@@ -9,7 +9,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8759270411:AAGJFqOzJJV4BLkxOTtIotjp3vLppQfcckA")
+BOT_TOKEN = os.getenv("8759270411:AAGJFqOzJJV4BLkxOTtIotjp3vLppQfcckA")
 DATA_FILE = Path("quiz_data_full.json")
 
 
@@ -24,6 +24,9 @@ QUIZ = load_data()
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
+ADMIN_ID = 748815070
+admin_mode = set()
+
 user_state = {}
 used_questions = {}
 
@@ -35,18 +38,23 @@ def build_keyboard():
     return kb.as_markup()
 
 
-def format_question(item, number=None):
-    title = f"🎯 Вопрос {number}" if number is not None else "🎯 Вопрос"
+def format_question(item, user_id, number=None):
+    title = f"🎯 Вопрос {number}" if number else "🎯 Вопрос"
 
-    return (
+    text = (
         f"{title}\n\n"
         f"{item['question']}\n\n"
         f"A) {item['options'][0]}\n"
         f"B) {item['options'][1]}\n"
         f"C) {item['options'][2]}\n"
-        f"D) {item['options'][3]}\n\n"
-        f"✅ Правильный ответ: {['A','B','C','D'][item['correct']-1]}) {item['correct_text']}"
+        f"D) {item['options'][3]}"
     )
+
+    if user_id in admin_mode:
+        correct_letter = ["A", "B", "C", "D"][item["correct"] - 1]
+        text += f"\n\n✅ Ответ: {correct_letter}) {item['correct_text']}"
+
+    return text
 
 
 def pick_question_for_user(user_id: int) -> int:
@@ -72,35 +80,54 @@ async def cmd_start(message: Message):
         "Привет.\n\n"
         "Команды:\n"
         "/quiz — случайный вопрос\n"
-        "/next — следующий вопрос"
+        "/next — следующий вопрос\n"
+        "/admin — включить админ режим"
     )
+
+
+@dp.message(Command("admin"))
+async def admin_mode_on(message: Message):
+    if message.from_user.id == ADMIN_ID:
+        admin_mode.add(message.from_user.id)
+        await message.answer("👑 Админ режим включен")
+    else:
+        await message.answer("❌ Нет доступа")
 
 
 @dp.message(Command("quiz"))
 async def cmd_quiz(message: Message):
     idx = pick_question_for_user(message.from_user.id)
     user_state[message.from_user.id] = idx
-    await message.answer(format_question(QUIZ[idx], idx + 1), reply_markup=build_keyboard())
+    await message.answer(
+        format_question(QUIZ[idx], message.from_user.id, idx + 1),
+        reply_markup=build_keyboard()
+    )
 
 
 @dp.message(Command("next"))
 async def cmd_next(message: Message):
     idx = pick_question_for_user(message.from_user.id)
     user_state[message.from_user.id] = idx
-    await message.answer(format_question(QUIZ[idx], idx + 1), reply_markup=build_keyboard())
+    await message.answer(
+        format_question(QUIZ[idx], message.from_user.id, idx + 1),
+        reply_markup=build_keyboard()
+    )
 
 
 @dp.callback_query(F.data == "next_question")
 async def cb_next_question(callback: CallbackQuery):
     idx = pick_question_for_user(callback.from_user.id)
     user_state[callback.from_user.id] = idx
-    await callback.message.answer(format_question(QUIZ[idx], idx + 1), reply_markup=build_keyboard())
+    await callback.message.answer(
+        format_question(QUIZ[idx], callback.from_user.id, idx + 1),
+        reply_markup=build_keyboard()
+    )
     await callback.answer()
 
 
 async def main():
-    if BOT_TOKEN == "PASTE_BOT_TOKEN_HERE":
-        raise RuntimeError("Вставь токен бота в код или передай через переменную окружения BOT_TOKEN")
+    if not BOT_TOKEN:
+        raise RuntimeError("Переменная BOT_TOKEN не задана в Railway Variables")
 
     await dp.start_polling(bot)
 
