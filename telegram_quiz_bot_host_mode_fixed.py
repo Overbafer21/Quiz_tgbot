@@ -11,10 +11,13 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATA_FILE = Path("quiz_data_full.json")
-
 ADMIN_ID = 748815070
 
-QUIZ = json.load(open(DATA_FILE, encoding="utf-8"))
+if not BOT_TOKEN:
+    raise RuntimeError("Переменная BOT_TOKEN не найдена в Railway Variables")
+
+with open(DATA_FILE, "r", encoding="utf-8") as f:
+    QUIZ = json.load(f)
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -25,37 +28,46 @@ used_questions_chat = {}
 scores = {}
 
 
-def get_letter(i):
+def get_letter(i: int) -> str:
     return ["A", "B", "C", "D"][i]
 
 
-def build_keyboard():
+def build_admin_keyboard():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➡️ Следующий вопрос", callback_data="next")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def build_player_keyboard():
     kb = InlineKeyboardBuilder()
     kb.button(text="A", callback_data="ans_0")
     kb.button(text="B", callback_data="ans_1")
     kb.button(text="C", callback_data="ans_2")
     kb.button(text="D", callback_data="ans_3")
-    kb.button(text="➡️ Следующий", callback_data="next")
+    kb.button(text="➡️ Следующий вопрос", callback_data="next")
     kb.adjust(4, 1)
     return kb.as_markup()
 
 
-def format_q(item, uid):
+def format_question(item: dict, is_admin: bool) -> str:
     text = (
-        f"🎯 {item['question']}\n\n"
+        f"🎯 Вопрос\n\n"
+        f"{item['question']}\n\n"
         f"A) {item['options'][0]}\n"
         f"B) {item['options'][1]}\n"
         f"C) {item['options'][2]}\n"
         f"D) {item['options'][3]}"
     )
 
-    if uid in admin_mode:
-        text += f"\n\n✅ {get_letter(item['correct']-1)}) {item['correct_text']}"
+    if is_admin:
+        correct_letter = get_letter(item["correct"] - 1)
+        text += f"\n\n✅ Ответ: {correct_letter}) {item['correct_text']}"
 
     return text
 
 
-def pick(chat_id):
+def pick_question(chat_id: int) -> int:
     if chat_id not in used_questions_chat:
         used_questions_chat[chat_id] = set()
 
@@ -71,85 +83,96 @@ def pick(chat_id):
     return idx
 
 
+async def send_current_question(target, user_id: int, chat_id: int):
+    idx = pick_question(chat_id)
+    user_state[chat_id] = idx
+    item = QUIZ[idx]
+
+    is_admin = user_id in admin_mode
+    text = format_question(item, is_admin)
+
+    if is_admin:
+        await target.answer(text, reply_markup=build_admin_keyboard())
+    else:
+        await target.answer(text, reply_markup=build_player_keyboard())
+
+
 @dp.message(Command("start"))
-async def start(m: Message):
-    await m.answer("готов\n/quiz /admin /exit_admin /score")
+async def cmd_start(message: Message):
+    await message.answer(
+        "Готов.\n\n"
+        "/quiz — новый вопрос\n"
+        "/admin — админ режим\n"
+        "/exit_admin — выйти из админ режима\n"
+        "/score — очки"
+    )
 
 
 @dp.message(Command("admin"))
-async def admin(m: Message):
-    if m.from_user.id == ADMIN_ID:
-        admin_mode.add(m.from_user.id)
-        await m.answer("👑 админ режим включен")
+async def cmd_admin(message: Message):
+    if message.from_user.id == ADMIN_ID:
+        admin_mode.add(message.from_user.id)
+        await message.answer("👑 Админ-режим включён")
     else:
-        await m.answer("❌ нет доступа")
+        await message.answer("❌ Нет доступа")
 
 
 @dp.message(Command("exit_admin"))
-async def exit_admin(m: Message):
-    admin_mode.discard(m.from_user.id)
-    await m.answer("👤 обычный режим")
+async def cmd_exit_admin(message: Message):
+    admin_mode.discard(message.from_user.id)
+    await message.answer("👤 Обычный режим")
 
 
 @dp.message(Command("quiz"))
-async def quiz(m: Message):
-    idx = pick(m.chat.id)
-    user_state[m.chat.id] = idx
-
-    # 👑 админ — БЕЗ кнопок
-    if m.from_user.id in admin_mode:
-        await m.answer(format_q(QUIZ[idx], m.from_user.id))
-    else:
-        await m.answer(
-            format_q(QUIZ[idx], m.from_user.id),
-            reply_markup=build_keyboard()
-        )
+async def cmd_quiz(message: Message):
+    await send_current_question(message, message.from_user.id, message.chat.id)
 
 
 @dp.message(Command("score"))
-async def score(m: Message):
+async def cmd_score(message: Message):
     if not scores:
-        return await m.answer("пусто")
+        await message.answer("Пока никто не набрал очков")
+        return
 
-    text = "🏆\n"
-    for k, v in sorted(scores.items(), key=lambda x: -x[1]):
-        text += f"{k}: {v}\n"
-
-    await m.answer(text)
+    lines = ["🏆 Очки:\n"]
+    for name, value in sorted(scores.items(), key=lambda x: -x[1]):
+        lines.append(f"{name}: {value}")
+    await message.answer("\n".join(lines))
 
 
 @dp.callback_query(F.data.startswith("ans_"))
-async def answer(c: CallbackQuery):
-    idx = user_state.get(c.message.chat.id)
+async def cb_answer(callback: CallbackQuery):
+    # админу отвечать кнопками не нужно
+    if callback.from_user.id in admin_mode:
+        await callback.answer("Ты в админ-режиме")
+        return
+
+    idx = user_state.get(callback.message.chat.id)
     if idx is None:
-        return await c.answer()
+        await callback.answer("Сначала вызови /quiz")
+        return
 
-    q = QUIZ[idx]
-    ans = int(c.data.split("_")[1])
+    item = QUIZ[idx]
+    picked = int(callback.data.split("_")[1])
 
-    if ans == q["correct"] - 1:
-        scores[c.from_user.first_name] = scores.get(c.from_user.first_name, 0) + 1
-        await c.message.answer("✅ правильно")
+    if picked == item["correct"] - 1:
+        username = callback.from_user.first_name or "Игрок"
+        scores[username] = scores.get(username, 0) + 1
+        await callback.answer("Правильно!")
+        await callback.message.answer("✅ Верно")
     else:
-        await c.message.answer("❌ мимо")
-
-    await c.answer()
-
+        right_letter = get_letter(item["correct"] - 1)
+        await callback.answer("Неверно")
+        await callback.message.answer(f"❌ Неверно. Правильный ответ: {right_letter}")
 
 @dp.callback_query(F.data == "next")
-async def next_q(c: CallbackQuery):
-    idx = pick(c.message.chat.id)
-    user_state[c.message.chat.id] = idx
-
-    if c.from_user.id in admin_mode:
-        await c.message.answer(format_q(QUIZ[idx], c.from_user.id))
-    else:
-        await c.message.answer(
-            format_q(QUIZ[idx], c.from_user.id),
-            reply_markup=build_keyboard()
-        )
-
-    await c.answer()
+async def cb_next(callback: CallbackQuery):
+    await send_current_question(
+        callback.message,
+        callback.from_user.id,
+        callback.message.chat.id
+    )
+    await callback.answer()
 
 
 async def main():
